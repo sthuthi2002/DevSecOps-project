@@ -132,3 +132,36 @@ Job_url: ${JOB_URL}"""
         slackSend(channel: "#devops", token: 'slack-token', color: 'danger', message: buildSummary)
     }
 }
+stage('Trivy Scan') {
+    steps {
+        sh """
+        docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+        aquasec/trivy:latest image \
+        --severity HIGH,CRITICAL \
+        --format json \
+        --output trivy-report.json \
+        ${IMAGE_NAME}:latest
+        """
+    }
+}
+
+stage('OWASP ZAP Scan') {
+    steps {
+        sh """
+        docker run --rm --network host ghcr.io/zaproxy/zap-stable:latest \
+        zap-baseline.py -t http://localhost:8080 -J zap-report.json || true
+        """
+    }
+}
+
+stage('Generate Security HTML Report') {
+    steps {
+        sh 'python3 scripts/generate-simple-report.py'
+    }
+}
+
+stage('Upload HTML Report to S3') {
+    steps {
+        sh "aws s3 cp security-report.html s3://${S3_BUCKET}/"
+    }
+}
