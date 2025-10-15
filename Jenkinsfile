@@ -6,10 +6,10 @@ pipeline {
     }
 
     environment {
-        GIT_REPO       = 'https://github.com/sthuthi2002/DevSecOps-project.git'
-        IMAGE_NAME     = 'sthuthi2002/spring-boot-app'
-        S3_BUCKET      = 'devsecops-project'
-        SONARQUBE_SERVER = 'SonarQube'  // EXACT name from Jenkins → Configure System → SonarQube servers
+        GIT_REPO = 'https://github.com/sthuthi2002/DevSecOps-project.git'
+        IMAGE_NAME = 'sthuthi2002/spring-boot-app'
+        S3_BUCKET = 'devsecops-project'
+        SONARQUBE_SERVER = 'SonarQube-server' // Jenkins → Configure System → SonarQube installations
     }
 
     stages {
@@ -38,10 +38,10 @@ pipeline {
             steps {
                 withSonarQubeEnv("${SONARQUBE_SERVER}") {
                     sh """
-                    mvn clean verify sonar:sonar \
-                        -Dsonar.projectKey=devsecops-project \
-                        -Dsonar.host.url=$SONAR_HOST_URL \
-                        -Dsonar.login=$SONAR_AUTH_TOKEN
+                        mvn clean verify sonar:sonar \
+                            -Dsonar.projectKey=devsecops-project \
+                            -Dsonar.host.url=$SONAR_HOST_URL \
+                            -Dsonar.login=$SONAR_AUTH_TOKEN
                     """
                 }
             }
@@ -60,8 +60,8 @@ pipeline {
         stage('Docker Build') {
             steps {
                 sh """
-                docker build -t ${IMAGE_NAME}:v1.${BUILD_ID} .
-                docker tag ${IMAGE_NAME}:v1.${BUILD_ID} ${IMAGE_NAME}:latest
+                    docker build -t ${IMAGE_NAME}:v1.${BUILD_ID} .
+                    docker tag ${IMAGE_NAME}:v1.${BUILD_ID} ${IMAGE_NAME}:latest
                 """
             }
         }
@@ -70,12 +70,12 @@ pipeline {
         stage('Trivy Scan') {
             steps {
                 sh """
-                docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
-                aquasec/trivy:latest image \
-                --severity HIGH,CRITICAL \
-                --format json \
-                --output trivy-report.json \
-                ${IMAGE_NAME}:latest
+                    docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+                    aquasec/trivy:latest image \
+                    --severity HIGH,CRITICAL \
+                    --format json \
+                    --output trivy-report.json \
+                    ${IMAGE_NAME}:latest
                 """
             }
         }
@@ -84,18 +84,18 @@ pipeline {
         stage('OWASP ZAP Scan') {
             steps {
                 sh """
-                docker run --rm --network host ghcr.io/zaproxy/zap-stable:latest \
-                zap-baseline.py -t http://localhost:8080 -J zap-report.json || true
+                    docker run --rm --network host ghcr.io/zaproxy/zap-stable:latest \
+                    zap-baseline.py -t http://localhost:8080 -J zap-report.json || true
                 """
             }
         }
 
-        /* --- Stage 8: Upload Scan Reports to S3 --- */
+        /* --- Stage 8: Upload Reports --- */
         stage('Upload Scan Reports to S3') {
             steps {
                 sh """
-                aws s3 cp trivy-report.json s3://${S3_BUCKET}/
-                aws s3 cp zap-report.json s3://${S3_BUCKET}/
+                    aws s3 cp trivy-report.json s3://${S3_BUCKET}/
+                    aws s3 cp zap-report.json s3://${S3_BUCKET}/
                 """
             }
         }
@@ -118,10 +118,10 @@ pipeline {
                     ]
                 ) {
                     sh """
-                    docker login -u ${DOCKER_USERNAME} -p ${DOCKER_PASSWORD}
-                    docker push ${IMAGE_NAME}:v1.${BUILD_ID}
-                    docker push ${IMAGE_NAME}:latest
-                    docker rmi ${IMAGE_NAME}:v1.${BUILD_ID} ${IMAGE_NAME}:latest
+                        docker login -u ${DOCKER_USERNAME} -p ${DOCKER_PASSWORD}
+                        docker push ${IMAGE_NAME}:v1.${BUILD_ID}
+                        docker push ${IMAGE_NAME}:latest
+                        docker rmi ${IMAGE_NAME}:v1.${BUILD_ID} ${IMAGE_NAME}:latest
                     """
                 }
             }
@@ -144,7 +144,11 @@ pipeline {
     post {
         always {
             script {
-                sendSlackNotification()
+                try {
+                    sendSlackNotification()
+                } catch (err) {
+                    echo "Slack notification failed: ${err}"
+                }
             }
         }
     }
@@ -158,9 +162,12 @@ def sendSlackNotification() {
 *Status:* ${currentBuild.currentResult}
 *Build URL:* ${BUILD_URL}
 """
+
     def color = (currentBuild.currentResult == "SUCCESS") ? 'good' : 'danger'
 
+    // Use Jenkins Credential ID for Slack token
     withCredentials([string(credentialsId: 'slack-token-id', variable: 'SLACK_TOKEN')]) {
         slackSend(channel: '#devops', token: SLACK_TOKEN, color: color, message: buildSummary)
     }
 }
+
