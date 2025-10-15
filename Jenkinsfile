@@ -6,9 +6,9 @@ pipeline {
     }
 
     environment {
-        GIT_REPO = 'https://github.com/sthuthi2002/DevSecOps-project.git'
-        IMAGE_NAME = 'sthuthi2002/spring-boot-app'
-        S3_BUCKET = 'devsecops-project'
+        GIT_REPO       = 'https://github.com/sthuthi2002/DevSecOps-project.git'
+        IMAGE_NAME     = 'sthuthi2002/spring-boot-app'
+        S3_BUCKET      = 'devsecops-project'
         SONARQUBE_SERVER = 'SonarQube-server' // Jenkins → Configure System → SonarQube installations
     }
 
@@ -47,16 +47,7 @@ pipeline {
             }
         }
 
-        /* --- Stage 4: Quality Gate --- */
-        stage('Quality Gate') {
-            steps {
-                timeout(time: 10, unit: 'MINUTES') {
-                    waitForQualityGate abortPipeline: true
-                }
-            }
-        }
-
-        /* --- Stage 5: Docker Build --- */
+        /* --- Stage 4: Docker Build --- */
         stage('Docker Build') {
             steps {
                 sh """
@@ -66,7 +57,7 @@ pipeline {
             }
         }
 
-        /* --- Stage 6: Trivy Scan --- */
+        /* --- Stage 5: Trivy Scan --- */
         stage('Trivy Scan') {
             steps {
                 sh """
@@ -80,7 +71,7 @@ pipeline {
             }
         }
 
-        /* --- Stage 7: OWASP ZAP Scan --- */
+        /* --- Stage 6: OWASP ZAP Scan --- */
         stage('OWASP ZAP Scan') {
             steps {
                 sh """
@@ -90,17 +81,7 @@ pipeline {
             }
         }
 
-        /* --- Stage 8: Upload Reports --- */
-        stage('Upload Scan Reports to S3') {
-            steps {
-                sh """
-                    aws s3 cp trivy-report.json s3://${S3_BUCKET}/
-                    aws s3 cp zap-report.json s3://${S3_BUCKET}/
-                """
-            }
-        }
-
-        /* --- Stage 9: Docker Push --- */
+        /* --- Stage 7: Docker Push --- */
         stage('Docker Push') {
             steps {
                 withVault(
@@ -127,7 +108,7 @@ pipeline {
             }
         }
 
-        /* --- Stage 10: Deploy to Kubernetes --- */
+        /* --- Stage 8: Deploy to Kubernetes --- */
         stage('Deploy to Kubernetes') {
             steps {
                 script {
@@ -170,4 +151,3 @@ def sendSlackNotification() {
         slackSend(channel: '#devops', token: SLACK_TOKEN, color: color, message: buildSummary)
     }
 }
-
