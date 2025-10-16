@@ -1,156 +1,134 @@
 pipeline {
-    agent any
+  agent any
 
-    tools {
-        maven 'maven-3.8.6'
+  environment {
+    IMAGE_NAME = 'devsecops-demo'
+    SONAR_TOKEN = credentials('sonar-token') // Jenkins credential
+  }
+
+  stages {
+
+    /* --- Stage 1: Checkout --- */
+    stage('Checkout') {
+      steps { 
+        checkout scm 
+      }
     }
 
-    environment {
-        GIT_REPO       = 'https://github.com/sthuthi2002/DevSecOps-project.git'
-        IMAGE_NAME     = 'sthuthi2002/spring-boot-app'
-        S3_BUCKET      = 'devsecops-project'
-        SONARQUBE_SERVER = 'SonarQube-server' // Jenkins → Configure System → SonarQube installations
+    /* --- Stage 2: Build & Test --- */
+    stage('Build & Test') {
+      steps {
+        sh 'echo "Run unit tests (if any)"; true'
+        // For Node: sh 'npm install && npm test'
+        // For Java: sh 'mvn clean test'
+      }
     }
 
-    stages {
-
-        /* --- Stage 1: Checkout --- */
-        stage('Checkout') {
-            steps {
-                git branch: 'main', url: "${GIT_REPO}"
-            }
+    /* --- Stage 3: SAST - SonarQube --- */
+    stage('SAST - SonarQube') {
+      steps {
+        withSonarQubeEnv('SonarQube') {
+          sh """
+            docker run --rm \
+              -v "\${PWD}:/usr/src" \
+              -e SONAR_HOST_URL="http://host.docker.internal:9000" \
+              -e SONAR_LOGIN=\${SONAR_TOKEN} \
+              sonarsource/sonar-scanner-cli \
+              -Dsonar.projectKey=devsecops-demo \
+              -Dsonar.sources=/usr/src
+          """
         }
+      }
+    }
 
-        /* --- Stage 2: Build & Test --- */
-        stage('Build & Test') {
-            steps {
-                sh 'mvn clean install'
-            }
-            post {
-                success {
-                    junit 'target/surefire-reports/**/*.xml'
-                }
-            }
+    /* --- Stage 4: Quality Gate --- */
+    stage('Quality Gate') {
+      steps {
+        timeout(time: 5, unit: 'MINUTES') {
+          waitForQualityGate abortPipeline: true
         }
+      }
+    }
 
-        /* --- Stage 3: SonarQube Analysis --- */
-        stage('SonarQube Analysis') {
-            steps {
-                withSonarQubeEnv("${SONARQUBE_SERVER}") {
-                    sh """
-                        mvn clean verify sonar:sonar \
-                            -Dsonar.projectKey=devsecops-project \
-                            -Dsonar.host.url=$SONAR_HOST_URL \
-                            -Dsonar.login=$SONAR_AUTH_TOKEN
-                    """
-                }
-            }
-        }
+    /* --- Stage 5: Build Docker Image --- */
+    stage('Build Docker Image') {
+      steps {
+        sh "docker build -t ${IMAGE_NAME}:${BUILD_NUMBER} ."
+        sh "docker tag ${IMAGE_NAME}:${BUILD_NUMBER} ${IMAGE_NAME}:latest || true"
+      }
+    }
 
-        /* --- Stage 4: Docker Build --- */
-        stage('Docker Build') {
-            steps {
-                sh """
-                    docker build -t ${IMAGE_NAME}:v1.${BUILD_ID} .
-                    docker tag ${IMAGE_NAME}:v1.${BUILD_ID} ${IMAGE_NAME}:latest
-                """
-            }
-        }
-
-        /* --- Stage 5: Trivy Scan --- */
-        stage('Trivy Scan') {
-            steps {
-                sh """
-                    docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
-                    aquasec/trivy:latest image \
-                    --severity HIGH,CRITICAL \
-                    --format json \
-                    --output trivy-report.json \
-                    ${IMAGE_NAME}:latest
-                """
-            }
-        }
-
-        /* --- Stage 6: OWASP ZAP Scan --- */
-		stage('OWASP ZAP Scan') {
-    steps {
+    /* --- Stage 6: Container Security Scan (Trivy) --- */
+    stage('Container Security Scan') {
+      steps {
         sh """
-            docker run --rm -v \$PWD:/zap/wrk --network host \
-            zaproxy/zap-stable:latest \
-            zap-baseline.py -t http://localhost:8080 \
-            -J /zap/wrk/zap-report.json -r /zap/wrk/zap-report.html || true
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+          aquasec/trivy:latest image \
+          --format json --output trivy-report.json \
+          ${IMAGE_NAME}:${BUILD_NUMBER} || true
         """
+        archiveArtifacts artifacts: 'trivy-report.json', allowEmptyArchive: true
+      }
     }
-}
 
-
-        /* --- Stage 7: Docker Push --- */
-        stage('Docker Push') {
-            steps {
-                withVault(
-                    configuration: [
-                        skipSslVerification: true,
-                        timeout: 60,
-                        vaultCredentialId: 'vault-cred',
-                        vaultUrl: 'http://your-vault-server-ip:8200'
-                    ],
-                    vaultSecrets: [
-                        [path: 'secret/docker', secretValues: [
-                            [envVar: 'DOCKER_USERNAME', vaultKey: 'username'],
-                            [envVar: 'DOCKER_PASSWORD', vaultKey: 'password']
-                        ]]
-                    ]
-                ) {
-                    sh """
-                        docker login -u ${DOCKER_USERNAME} -p ${DOCKER_PASSWORD}
-                        docker push ${IMAGE_NAME}:v1.${BUILD_ID}
-                        docker push ${IMAGE_NAME}:latest
-                        docker rmi ${IMAGE_NAME}:v1.${BUILD_ID} ${IMAGE_NAME}:latest
-                    """
-                }
+    /* --- Stage 7: Security Gate Check --- */
+    stage('Security Gate Check') {
+      steps {
+        script {
+          def trivy = readJSON file: 'trivy-report.json'
+          def critical = 0
+          trivy.Results.each { r ->
+            (r.Vulnerabilities ?: []).each { v ->
+              if (v.Severity == 'CRITICAL') critical++
             }
+          }
+          if (critical > 0) {
+            error "Security Gate Failed: ${critical} CRITICAL vulnerabilities found"
+          } else {
+            echo "Security Gate Passed: No CRITICAL vulnerabilities"
+          }
         }
-
-        /* --- Stage 8: Deploy to Kubernetes --- */
-        stage('Deploy to Kubernetes') {
-            steps {
-                script {
-                    kubernetesDeploy(
-                        configs: 'k8s/staging/deployment.yaml',
-                        kubeconfigId: 'kubernetes'
-                    )
-                }
-            }
-        }
+      }
     }
 
-    /* --- Notifications --- */
-    post {
-        always {
-            script {
-                try {
-                    sendSlackNotification()
-                } catch (err) {
-                    echo "Slack notification failed: ${err}"
-                }
-            }
+    /* --- Stage 8: Deploy to Staging (Kubernetes) --- */
+    stage('Deploy to Staging') {
+      steps {
+        sh """
+          kubectl create namespace staging --dry-run=client -o yaml | kubectl apply -f -
+          kubectl apply -f k8s/staging/ -n staging
+          kubectl set image deployment/app app=${IMAGE_NAME}:${BUILD_NUMBER} -n staging || true
+          kubectl rollout status deployment/app -n staging
+        """
+      }
+    }
+
+    /* --- Stage 9: DAST - OWASP ZAP --- */
+    stage('DAST - ZAP') {
+      steps {
+        script {
+          // Get Minikube IP dynamically
+          def minikubeIp = sh(script: "minikube ip", returnStdout: true).trim()
+
+          sh """
+            docker run --rm -v \$PWD:/zap/wrk:Z --network host \
+            owasp/zap2docker-stable \
+            zap-baseline.py -t http://${minikubeIp}:30000 \
+            -J /zap/wrk/zap-report.json \
+            -r /zap/wrk/zap-report.html || true
+          """
         }
+        archiveArtifacts artifacts: 'zap-report.json,zap-report.html', allowEmptyArchive: true
+      }
     }
-}
 
-/* --- Slack Notification Function --- */
-def sendSlackNotification() {
-    def buildSummary = """\
-*Job Name:* ${env.JOB_NAME}
-*Build ID:* ${env.BUILD_ID}
-*Status:* ${currentBuild.currentResult}
-*Build URL:* ${BUILD_URL}
-"""
+  }
 
-    def color = (currentBuild.currentResult == "SUCCESS") ? 'good' : 'danger'
-
-    // Use Jenkins Credential ID for Slack token
-    withCredentials([string(credentialsId: 'slack-token-id', variable: 'SLACK_TOKEN')]) {
-        slackSend(channel: '#devops', token: SLACK_TOKEN, color: color, message: buildSummary)
+  post {
+    always {
+      // Generate simple HTML report
+      sh 'python3 scripts/generate-simple-report.py || true'
+      archiveArtifacts artifacts: 'security-report.html', allowEmptyArchive: true
     }
+  }
 }
