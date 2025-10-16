@@ -2,7 +2,7 @@ pipeline {
   agent any
   environment {
     IMAGE_NAME = 'devsecops-demo'
-    SONAR_TOKEN = credentials('sonar-token') // create this in Jenkins credentials
+    SONAR_TOKEN = credentials('sonar-token')
   }
   stages {
     stage('Checkout') {
@@ -12,8 +12,6 @@ pipeline {
     stage('Build & Test') {
       steps {
         sh 'echo "Run unit tests (if any)"; true'
-        // If Node app: sh 'npm install && npm test'
-        // If Java: sh 'mvn clean test'
       }
     }
 
@@ -86,8 +84,10 @@ pipeline {
 
     stage('DAST - ZAP') {
       steps {
-        // Use single quotes so Groovy does not try to parse $()
-        sh 'docker run --rm owasp/zap2docker-stable zap-baseline.py -t http://$(minikube ip):30000 -J zap-report.json || true'
+        script {
+          def minikubeIp = sh(script: "minikube ip", returnStdout: true).trim()
+          sh "docker run --rm owasp/zap2docker-stable zap-baseline.py -t http://${minikubeIp}:30000 -J zap-report.json || true"
+        }
         archiveArtifacts artifacts: 'zap-report.json', allowEmptyArchive: true
       }
     }
