@@ -2,18 +2,20 @@ pipeline {
     agent any
     environment {
         IMAGE_NAME = 'devsecops-demo'
-        SONAR_TOKEN = credentials('sonar-token') // Create in Jenkins credentials
+        SONAR_TOKEN = credentials('sonar-token') // Add this in Jenkins credentials
     }
     stages {
         stage('Checkout') {
-            steps { checkout scm }
+            steps {
+                checkout scm
+            }
         }
 
         stage('Build & Test') {
             steps {
-                sh 'echo "Running unit tests..."; true'
-                // Node: sh 'npm install && npm test'
-                // Java: sh 'mvn clean test'
+                sh 'echo "Run unit tests (if any)"; true'
+                // If Node app: sh 'npm install && npm test'
+                // If Java app: sh 'mvn clean test'
             }
         }
 
@@ -21,12 +23,12 @@ pipeline {
             steps {
                 withSonarQubeEnv('SonarQube') {
                     sh '''
-                    docker run --rm \
-                        -v "${PWD}:/usr/src" \
-                        -e SONAR_HOST_URL="http://host.docker.internal:9000" \
-                        -e SONAR_LOGIN=${SONAR_TOKEN} \
-                        sonarsource/sonar-scanner-cli \
-                        -Dsonar.projectKey=devsecops-demo -Dsonar.sources=/usr/src
+                        docker run --rm \
+                            -v "${PWD}:/usr/src" \
+                            -e SONAR_HOST_URL="http://host.docker.internal:9000" \
+                            -e SONAR_LOGIN=${SONAR_TOKEN} \
+                            sonarsource/sonar-scanner-cli \
+                            -Dsonar.projectKey=devsecops-demo -Dsonar.sources=/usr/src
                     '''
                 }
             }
@@ -42,14 +44,14 @@ pipeline {
 
         stage('Build Docker Image') {
             steps {
-                sh "docker build -t ${IMAGE_NAME}:${BUILD_NUMBER} ."
-                sh "docker tag ${IMAGE_NAME}:${BUILD_NUMBER} ${IMAGE_NAME}:latest || true"
+                sh 'docker build -t ${IMAGE_NAME}:${BUILD_NUMBER} .'
+                sh 'docker tag ${IMAGE_NAME}:${BUILD_NUMBER} ${IMAGE_NAME}:latest || true'
             }
         }
 
         stage('Container Security Scan') {
             steps {
-                sh "docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:latest image --format json --output trivy-report.json ${IMAGE_NAME}:${BUILD_NUMBER} || true"
+                sh 'docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:latest image --format json --output trivy-report.json ${IMAGE_NAME}:${BUILD_NUMBER} || true'
                 archiveArtifacts artifacts: 'trivy-report.json', allowEmptyArchive: true
             }
         }
@@ -84,9 +86,10 @@ pipeline {
             }
         }
 
-        stage('DAST - ZAP') {
+        stage('DAST - OWASP ZAP') {
             steps {
-                sh "docker run --rm owasp/zap2docker-stable zap-baseline.py -t http://$(minikube ip):30000 -J zap-report.json || true"
+                // Single quotes prevent Groovy from misinterpreting $()
+                sh 'docker run --rm owasp/zap2docker-stable zap-baseline.py -t http://$(minikube ip):30000 -J zap-report.json || true'
                 archiveArtifacts artifacts: 'zap-report.json', allowEmptyArchive: true
             }
         }
