@@ -136,7 +136,9 @@ pipeline {
 
     post {
         always {
-            sendSlackNotification()
+            script {
+                sendSlackNotification()
+            }
         }
     }
 }
