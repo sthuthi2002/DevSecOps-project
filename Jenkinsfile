@@ -1,102 +1,173 @@
 pipeline {
-  agent any
-  environment {
-    IMAGE_NAME = 'devsecops-demo'
-    SONAR_TOKEN = credentials('sonar-token')
-  }
-  stages {
-    stage('Checkout') {
-      steps { checkout scm }
+    agent any
+
+    tools {
+        maven 'maven-3.8.6'
     }
 
-    stage('Build & Test') {
-      steps {
-        sh 'echo "Run unit tests (if any)"; true'
-      }
+    environment {
+        GIT_REPO = 'https://github.com/sthuthi2002/DevSecOps-project.git'
+        IMAGE_NAME = 'sthuthi2002/sprint-boot-app'
+        S3_BUCKET = 'devsecops-project'
+        SONARQUBE_SERVER = 'SonarQube-server' // Jenkins configured SonarQube server name
     }
 
-    stage('SAST - SonarQube') {
-      steps {
-        withSonarQubeEnv('SonarQube') {
-          sh '''
-            docker run --rm \
-              -v "${PWD}:/usr/src" \
-              -e SONAR_HOST_URL="http://host.docker.internal:9000" \
-              -e SONAR_LOGIN=${SONAR_TOKEN} \
-              sonarsource/sonar-scanner-cli \
-              -Dsonar.projectKey=devsecops-demo -Dsonar.sources=/usr/src
-          '''
-        }
-      }
-    }
+    stages {
 
-    stage('Quality Gate') {
-      steps {
-        timeout(time: 5, unit: 'MINUTES') {
-          waitForQualityGate abortPipeline: true
-        }
-      }
-    }
-
-    stage('Build Docker Image') {
-      steps {
-        sh "docker build -t ${IMAGE_NAME}:${BUILD_NUMBER} ."
-        sh "docker tag ${IMAGE_NAME}:${BUILD_NUMBER} ${IMAGE_NAME}:latest || true"
-      }
-    }
-
-    stage('Container Security Scan') {
-      steps {
-        sh "docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:latest image --format json --output trivy-report.json ${IMAGE_NAME}:${BUILD_NUMBER} || true"
-        archiveArtifacts artifacts: 'trivy-report.json', allowEmptyArchive: true
-      }
-    }
-
-    stage('Security Gate Check') {
-      steps {
-        script {
-          def trivy = readJSON file: 'trivy-report.json'
-          def critical = 0
-          trivy.Results.each { r ->
-            (r.Vulnerabilities ?: []).each { v ->
-              if (v.Severity == 'CRITICAL') critical++
+        stage('Checkout Git') {
+            steps {
+                git branch: 'main', url: "${GIT_REPO}"
             }
-          }
-          if (critical > 0) {
-            error "Security Gate Failed: ${critical} CRITICAL vulnerabilities found"
-          } else {
-            echo "Security Gate Passed: No CRITICAL vulnerabilities"
-          }
         }
-      }
-    }
 
-    stage('Deploy to Staging') {
-      steps {
-        sh '''
-          kubectl create namespace staging --dry-run=client -o yaml | kubectl apply -f -
-          kubectl apply -f k8s/staging/ -n staging
-          kubectl set image deployment/app app=${IMAGE_NAME}:${BUILD_NUMBER} -n staging || true
-          kubectl rollout status deployment/app -n staging
-        '''
-      }
-    }
-
-    stage('DAST - ZAP') {
-      steps {
-        script {
-          def minikubeIp = sh(script: "minikube ip", returnStdout: true).trim()
-          sh "docker run --rm owasp/zap2docker-stable zap-baseline.py -t http://${minikubeIp}:30000 -J zap-report.json || true"
+        stage('Build & JUnit Test') {
+            steps {
+                sh 'mvn clean install'
+            }
+            post {
+                success {
+                    junit 'target/surefire-reports/**/*.xml'
+                }
+            }
         }
-        archiveArtifacts artifacts: 'zap-report.json', allowEmptyArchive: true
-      }
-    }
-  }
 
-  post {
-    always {
-      sh 'python3 scripts/generate-simple-report.py || true'
-      archiveArtifacts artifacts: 'security-report.html', allowEmptyArchive: true
+        stage('SonarQube Analysis') {
+            steps {
+                withSonarQubeEnv("${SONARQUBE_SERVER}") {
+                    sh """
+                    mvn clean verify sonar:sonar \
+                        -Dsonar.projectKey=devsecops-project-key \
+                         -Dsonar.host.url=$SONAR_HOST_URL \
+                        -Dsonar.login=$SONAR_AUTH_TOKEN
+                    """
+                }
+            }
+        }
+
+        stage('Quality Gate') {
+            steps {
+                timeout(time: 1, unit: 'HOURS') {
+                    waitForQualityGate abortPipeline: true
+                }
+            }
+        }
+
+        stage('Docker Build') {
+            steps {
+                sh """
+                docker build -t ${IMAGE_NAME}:v1.$BUILD_ID .
+                docker tag ${IMAGE_NAME}:v1.$BUILD_ID ${IMAGE_NAME}:latest
+                """
+            }
+        }
+
+        stage('Image Scan with Trivy') {
+            steps {
+                sh """
+                trivy image --format template --template "@/usr/local/share/trivy/templates/html.tpl" -o report.html ${IMAGE_NAME}:latest
+                """
+            }
+        }
+
+        stage('Upload Scan Report to AWS S3') {
+            steps {
+                sh "aws s3 cp report.html s3://${S3_BUCKET}/"
+            }
+        }
+         stage('Upload Scan Report to AWS S3') {
+            steps {
+                sh "aws s3 cp report.html s3://${S3_BUCKET}/"
+            }
+        }
+
+        stage('Docker Push') {
+            steps {
+                withVault(
+                    configuration: [
+                        skipSslVerification: true,
+                        timeout: 60,
+                        vaultCredentialId: 'vault-cred',
+                        vaultUrl: 'http://your-vault-server-ip:8200'
+                    ],
+                    vaultSecrets: [
+                        [path: 'secret/docker', secretValues: [
+                            [envVar: 'DOCKER_USERNAME', vaultKey: 'username'],
+                            [envVar: 'DOCKER_PASSWORD', vaultKey: 'password']
+                        ]]
+                    ]
+                ) {
+                    sh "docker login -u ${DOCKER_USERNAME} -p ${DOCKER_PASSWORD}"
+                    sh "docker push ${IMAGE_NAME}:v1.$BUILD_ID"
+                    sh "docker push ${IMAGE_NAME}:latest"
+                    sh "docker rmi ${IMAGE_NAME}:v1.$BUILD_ID ${IMAGE_NAME}:latest"
+                }
+            }
+        }
+
+        stage('Deploy to Kubernetes') {
+            steps {
+                script {
+                    kubernetesDeploy(
+                        configs: 'k8s/staging/deployment.yaml',
+                                    kubeconfigId: 'kubernetes'
+                    )
+                }
+            }
+        }
+
     }
-  }
+
+    post {
+        always {
+            sendSlackNotification()
+        }
+    }
+}
+
+def sendSlackNotification() {
+    def buildSummary = """Job_name: ${env.JOB_NAME}
+Build_id: ${env.BUILD_ID}
+Status: ${currentBuild.currentResult}
+Build_url: ${BUILD_URL}
+Job_url: ${JOB_URL}"""
+
+    if (currentBuild.currentResult == "SUCCESS") {
+        slackSend(channel: "#devops", token: 'slack-token', color: 'good', message: buildSummary)
+    } else {
+        slackSend(channel: "#devops", token: 'slack-token', color: 'danger', message: buildSummary)
+    }
+}
+stage('Trivy Scan') {
+    stage('Trivy Scan') {
+    steps {
+        sh """
+        docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+        aquasec/trivy:latest image \
+        --severity HIGH,CRITICAL \
+        --format json \
+        --output trivy-report.json \
+        ${IMAGE_NAME}:latest
+        """
+    }
+}
+
+stage('OWASP ZAP Scan') {
+    steps {
+        sh """
+        docker run --rm --network host ghcr.io/zaproxy/zap-stable:latest \
+        zap-baseline.py -t http://localhost:8080 -J zap-report.json || true
+        """
+    }
+}
+
+stage('Generate Security HTML Report') {
+    steps {
+        sh 'python3 scripts/generate-simple-report.py'
+    }
+}
+
+stage('Upload HTML Report to S3') {
+    steps {
+        sh "aws s3 cp security-report.html s3://${S3_BUCKET}/"
+    }
 }
