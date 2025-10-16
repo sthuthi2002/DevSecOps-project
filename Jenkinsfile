@@ -72,14 +72,17 @@ pipeline {
         }
 
         /* --- Stage 6: OWASP ZAP Scan --- */
-        stage('OWASP ZAP Scan') {
-            steps {
-                sh """
-                    docker run --rm --network host ghcr.io/zaproxy/zap-stable:latest \
-                    zap-baseline.py -t http://localhost:8080 -J zap-report.json || true
-                """
-            }
-        }
+		stage('OWASP ZAP Scan') {
+    steps {
+        sh """
+            docker run --rm -v \$PWD:/zap/wrk --network host \
+            zaproxy/zap-stable:latest \
+            zap-baseline.py -t http://localhost:8080 \
+            -J /zap/wrk/zap-report.json -r /zap/wrk/zap-report.html || true
+        """
+    }
+}
+
 
         /* --- Stage 7: Docker Push --- */
         stage('Docker Push') {
