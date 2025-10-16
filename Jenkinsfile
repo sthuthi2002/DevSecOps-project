@@ -6,10 +6,10 @@ pipeline {
     }
 
     environment {
-        GIT_REPO = 'https://github.com/sthuthi2002/DevSecOps-project.git'
-        IMAGE_NAME = 'sthuthi2002/sprint-boot-app'
+        GIT_REPO = 'https://github.com/praveensirvi1212/DevSecOps-project.git'
+        IMAGE_NAME = 'praveensirvi/sprint-boot-app'
         S3_BUCKET = 'devsecops-project'
-        SONARQUBE_SERVER = 'SonarQube-server' // Jenkins configured SonarQube server name
+        SONARQUBE_SERVER = 'SonarQube-server'  // configured in Jenkins
     }
 
     stages {
@@ -37,7 +37,7 @@ pipeline {
                     sh """
                     mvn clean verify sonar:sonar \
                         -Dsonar.projectKey=devsecops-project-key \
-                         -Dsonar.host.url=$SONAR_HOST_URL \
+                        -Dsonar.host.url=$SONAR_HOST_URL \
                         -Dsonar.login=$SONAR_AUTH_TOKEN
                     """
                 }
@@ -61,22 +61,38 @@ pipeline {
             }
         }
 
-        stage('Image Scan with Trivy') {
+        stage('Trivy Image Scan') {
             steps {
                 sh """
-                trivy image --format template --template "@/usr/local/share/trivy/templates/html.tpl" -o report.html ${IMAGE_NAME}:latest
+                trivy image --format template \
+                    --template "@/usr/local/share/trivy/templates/html.tpl" \
+                    -o trivy-report.html ${IMAGE_NAME}:latest
                 """
             }
         }
 
-        stage('Upload Scan Report to AWS S3') {
+        stage('OWASP ZAP Scan') {
             steps {
-                sh "aws s3 cp report.html s3://${S3_BUCKET}/"
+                sh """
+                docker run --rm --network host ghcr.io/zaproxy/zap-stable:latest \
+                    zap-baseline.py -t http://localhost:8080 -J zap-report.json || true
+                """
             }
         }
-         stage('Upload Scan Report to AWS S3') {
+
+        stage('Generate Combined Security Report') {
             steps {
-                sh "aws s3 cp report.html s3://${S3_BUCKET}/"
+                sh 'python3 scripts/generate-simple-report.py'
+            }
+        }
+
+        stage('Upload Reports to AWS S3') {
+            steps {
+                sh """
+                aws s3 cp trivy-report.html s3://${S3_BUCKET}/
+                aws s3 cp zap-report.json s3://${S3_BUCKET}/
+                aws s3 cp security-report.html s3://${S3_BUCKET}/
+                """
             }
         }
 
@@ -96,10 +112,12 @@ pipeline {
                         ]]
                     ]
                 ) {
-                    sh "docker login -u ${DOCKER_USERNAME} -p ${DOCKER_PASSWORD}"
-                    sh "docker push ${IMAGE_NAME}:v1.$BUILD_ID"
-                    sh "docker push ${IMAGE_NAME}:latest"
-                    sh "docker rmi ${IMAGE_NAME}:v1.$BUILD_ID ${IMAGE_NAME}:latest"
+                    sh """
+                    docker login -u ${DOCKER_USERNAME} -p ${DOCKER_PASSWORD}
+                    docker push ${IMAGE_NAME}:v1.$BUILD_ID
+                    docker push ${IMAGE_NAME}:latest
+                    docker rmi ${IMAGE_NAME}:v1.$BUILD_ID ${IMAGE_NAME}:latest
+                    """
                 }
             }
         }
@@ -108,13 +126,12 @@ pipeline {
             steps {
                 script {
                     kubernetesDeploy(
-                        configs: 'k8s/staging/deployment.yaml',
-                                    kubeconfigId: 'kubernetes'
+                        configs: 'spring-boot-deployment.yaml',
+                        kubeconfigId: 'kubernetes'
                     )
                 }
             }
         }
-
     }
 
     post {
@@ -135,39 +152,5 @@ Job_url: ${JOB_URL}"""
         slackSend(channel: "#devops", token: 'slack-token', color: 'good', message: buildSummary)
     } else {
         slackSend(channel: "#devops", token: 'slack-token', color: 'danger', message: buildSummary)
-    }
-}
-stage('Trivy Scan') {
-    stage('Trivy Scan') {
-    steps {
-        sh """
-        docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
-        aquasec/trivy:latest image \
-        --severity HIGH,CRITICAL \
-        --format json \
-        --output trivy-report.json \
-        ${IMAGE_NAME}:latest
-        """
-    }
-}
-
-stage('OWASP ZAP Scan') {
-    steps {
-        sh """
-        docker run --rm --network host ghcr.io/zaproxy/zap-stable:latest \
-        zap-baseline.py -t http://localhost:8080 -J zap-report.json || true
-        """
-    }
-}
-
-stage('Generate Security HTML Report') {
-    steps {
-        sh 'python3 scripts/generate-simple-report.py'
-    }
-}
-
-stage('Upload HTML Report to S3') {
-    steps {
-        sh "aws s3 cp security-report.html s3://${S3_BUCKET}/"
     }
 }
